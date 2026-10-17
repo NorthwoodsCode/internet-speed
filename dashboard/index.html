@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>internet-speed — ISP delivered vs. promised</title>
+   <link rel="stylesheet" href="style.css">
+   <!-- Chart.js + date adapter, vendored locally so the dashboard works offline.
+        Source: https://www.chartjs.org/ (MIT licensed). See dashboard/vendor/README. -->
+   <script src="vendor/chart.umd.min.js"></script>
+   <script src="vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+   <header>
+      <h1>internet-speed</h1>
+      <p class="subtitle">Track what your ISP <em>actually</em> delivers vs. what they promised</p>
+   </header>
+
+   <section id="config-bar">
+      <div class="config-group">
+         <label>Promised down (Mbps)
+            <input type="number" id="promised-down" min="0" step="any" placeholder="e.g. 400">
+         </label>
+         <label>Promised up (Mbps)
+            <input type="number" id="promised-up" min="0" step="any" placeholder="e.g. 20">
+         </label>
+      </div>
+      <div class="range-buttons">
+         <button data-range="24h">24h</button>
+         <button data-range="7d">7d</button>
+         <button data-range="30d">30d</button>
+         <button data-range="all" class="active">All</button>
+      </div>
+   </section>
+
+   <section id="stats" class="stats-grid"></section>
+
+   <section id="charts">
+      <div class="chart-wrap"><canvas id="chart-down"></canvas></div>
+      <div class="chart-wrap"><canvas id="chart-up"></canvas></div>
+      <div class="chart-wrap"><canvas id="chart-ping"></canvas></div>
+      <div class="chart-wrap chart-hours-wrap"><canvas id="chart-hours"></canvas></div>
+   </section>
+
+   <section id="load-area" hidden>
+      <div id="drop-zone">
+         <p><strong>No data loaded.</strong></p>
+         <p>Drop a <code>speed-&lt;ip&gt;.csv</code> file here, or
+            <label class="file-button">
+               <input type="file" id="file-input" accept=".csv,text/csv">
+               click to pick one
+            </label>.
+         </p>
+         <p class="hint">You can also pass <code>?csv=URL</code> in the URL to load a remote CSV.</p>
+      </div>
+   </section>
+
+   <footer>
+      <p>
+         <a href="https://github.com/NorthwoodsCode/internet-speed">source on github</a>
+         &nbsp;·&nbsp; vanilla JS + <a href="https://www.chartjs.org/">Chart.js</a>, no build step
+      </p>
+   </footer>
+
+   <script src="dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Generated charts
+speed-chart.png
+*.png
+
+# Local speed test logs
+speed_logs/
+*.csv
+!examples/*.csv

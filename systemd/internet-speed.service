@@ -1,0 +1,12 @@
+[Unit]
+Description=internet-speed: run a speed test and append to CSV log
+Documentation=https://github.com/NorthwoodsCode/internet-speed
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@SCRIPT_PATH@
+Nice=10
+# Pass through env vars if set in the user's environment.
+PassEnvironment=SPEED_LOG_DIR SPECTRUM_PROMISED_DOWN SPECTRUM_PROMISED_UP

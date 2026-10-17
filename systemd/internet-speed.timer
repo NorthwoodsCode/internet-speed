@@ -1,0 +1,14 @@
+[Unit]
+Description=internet-speed: trigger speed test every 30 minutes
+Documentation=https://github.com/NorthwoodsCode/internet-speed
+
+[Timer]
+# Fire 5 min after boot, then every 30 min while system is up.
+OnBootSec=5min
+OnUnitActiveSec=30min
+# If the system was off when we should have fired, run on next boot.
+Persistent=true
+Unit=internet-speed.service
+
+[Install]
+WantedBy=timers.target
