@@ -31,7 +31,7 @@ chmod +x speedtest.sh
 export SPECTRUM_PROMISED_DOWN=500        # your plan's down Mbps
 export SPECTRUM_PROMISED_UP=20           # your plan's up Mbps
 
-# 4. Run one test — should append a row to ~/speed_logs/speed-<ip>.csv
+# 4. Run one test — should append a row to ~/speed_logs/internet-speed.csv
 ./speedtest.sh
 
 # 5. See what you've got — try all three:
@@ -51,7 +51,7 @@ python3 -m http.server 8000
 That's it for the bash side. For PNG charts or PDF reports, see
 [View your data](#view-your-data) below — they need `matplotlib`.
 
-- **Bash collector** — appends one row per run to a per-IP CSV log
+- **Bash collector** — appends one row per run to a single CSV log
 - **HTML dashboard** — interactive Chart.js with time-series, hour-of-day
   bars, outage shading, and color-coded stat cards  
   → **[live demo](https://NorthwoodsCode.github.io/internet-speed/dashboard/)** (sample data only — loads `examples/speed-sample.csv`)
@@ -218,18 +218,18 @@ python3 -m http.server 8000
 # open http://localhost:8000/dashboard/
 ```
 
-Drop your `~/speed_logs/speed-<ip>.csv` into the page (or copy it next to
+Drop your `~/speed_logs/internet-speed.csv` into the page (or copy it next to
 `dashboard/index.html` as `speed.csv` and refresh). Try the live demo to see
 what it looks like: <https://NorthwoodsCode.github.io/internet-speed/dashboard/>
 
 The live demo is GitHub Pages serving this repo's `master` branch, and it shows
-**sample data only** (`examples/speed-sample.csv`). Don't commit your own logs
-to get them on there: the `speed-<ip>.csv` filename exposes your public IP, and
-the samples reveal when you're home and online. `.gitignore` blocks `*.csv`
-outside `examples/` for exactly that reason. Dropping a file onto the page, even
-the live one, never uploads anything; parsing happens entirely in your browser.
-(The empty `.nojekyll` file at the repo root tells Pages to publish the files
-as-is instead of running them through Jekyll.)
+**sample data only** (`examples/speed-sample.csv`). Don't commit your own log
+to get it on there: every row records your public IP, and the samples reveal
+when you're home and online. `.gitignore` blocks `*.csv` outside `examples/`
+for exactly that reason. Dropping a file onto the page, even the live one,
+never uploads anything; parsing happens entirely in your browser. (The empty
+`.nojekyll` file at the repo root tells Pages to publish the files as-is
+instead of running them through Jekyll.)
 
 Features:
 
@@ -281,8 +281,10 @@ you directly in a terminal — no graphical viewer needed.
 
 ## Output format
 
-One CSV per public IP (so a move/ISP change starts a fresh log). Standard
-`speedtest-cli --csv` columns:
+One CSV, `~/speed_logs/internet-speed.csv`, with the standard
+`speedtest-cli --csv` columns. The last column records the public IP each
+sample was taken from, so a move or ISP change shows up in the data rather
+than as a separate file:
 
 ```csv
 Server ID,Sponsor,Server Name,Timestamp,Distance,Ping,Download,Upload,Share,IP Address
@@ -291,13 +293,17 @@ Server ID,Sponsor,Server Name,Timestamp,Distance,Ping,Download,Upload,Share,IP A
 
 Download and Upload are in **bits/sec** (divide by 1,000,000 for Mbps).
 
+Versions before 1.3 wrote one file per IP, `speed-<ip>.csv`. Every subcommand,
+`plot.py` and `report.py` still read those alongside `internet-speed.csv`, so
+upgrading needs no migration; new samples simply go to the new file.
+
 ---
 
 ## Configuration
 
 | Env var                  | Default          | Purpose                                          |
 | ------------------------ | ---------------- | ------------------------------------------------ |
-| `SPEED_LOG_DIR`     | `~/speed_logs/`  | Where CSV logs go                                |
+| `SPEED_LOG_DIR`     | `~/speed_logs/`  | Directory holding `internet-speed.csv`           |
 | `SPEED_PREFLIGHT_HOST` | `8.8.8.8:53`  | `host:port` probed before each run so an "internet is out" condition fails fast. Set to an empty string to skip the probe. |
 | `SPECTRUM_PROMISED_DOWN` | _(unset)_        | Your plan's promised down in Mbps                |
 | `SPECTRUM_PROMISED_UP`   | _(unset)_        | Your plan's promised up in Mbps                  |
@@ -363,7 +369,8 @@ drag your CSV onto the page.
 
 **`summary` says "no logs found"**  
 You haven't run `./speedtest.sh` yet, or you set `SPEED_LOG_DIR` to
-the wrong place. Check `~/speed_logs/` for files named `speed-<ip>.csv`.
+the wrong place. Check `~/speed_logs/` for `internet-speed.csv` (or, from
+versions before 1.3, files named `speed-<ip>.csv`).
 
 **No "network is down" message on macOS even when offline**  
 The 3-second preflight needs GNU `timeout`, which stock macOS lacks, so the

@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--csv",
         type=Path,
-        help="CSV file to plot (default: all speed-*.csv in SPEED_LOG_DIR)",
+        help="CSV file to plot (default: every log in SPEED_LOG_DIR)",
     )
     p.add_argument(
         "--output",
@@ -94,6 +94,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+# The log current versions write, then any legacy per-IP logs from versions
+# before 1.3. Mirrors _log_files in speedtest.sh. load_rows merges and
+# time-sorts every row, so file order doesn't matter.
+LOG_GLOBS = ("internet-speed.csv", "speed-*.csv")
+
+
 def find_csvs(csv_arg: Path | None) -> list[Path]:
     if csv_arg:
         if not csv_arg.exists():
@@ -101,9 +107,10 @@ def find_csvs(csv_arg: Path | None) -> list[Path]:
         return [csv_arg]
     if not DEFAULT_LOG_DIR.exists():
         sys.exit(f"{PROG}: log dir {DEFAULT_LOG_DIR} does not exist. Run speedtest.sh first.")
-    paths = sorted(DEFAULT_LOG_DIR.glob("speed-*.csv"))
+    paths = [p for pattern in LOG_GLOBS for p in sorted(DEFAULT_LOG_DIR.glob(pattern))]
     if not paths:
-        sys.exit(f"{PROG}: no speed-*.csv files in {DEFAULT_LOG_DIR}. Run speedtest.sh first.")
+        sys.exit(f"{PROG}: no internet-speed.csv (or legacy speed-*.csv) in {DEFAULT_LOG_DIR}. "
+                 "Run speedtest.sh first.")
     return paths
 
 

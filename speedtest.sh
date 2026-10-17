@@ -9,7 +9,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-readonly VERSION="1.2.0"
+readonly VERSION="1.3.0"
 # Assign first, then mark readonly: `readonly X="$(cmd)"` would mask a
 # failing $(cmd) (shellcheck SC2155), and set -e could never catch it.
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
@@ -20,6 +20,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 readonly SCRIPT_NAME SCRIPT_DIR SCRIPT_PATH
 readonly LOG_DIR="${SPEED_LOG_DIR:-$HOME/speed_logs}"
+# Every run appends to this one file. The public IP is recorded in each
+# row's last column, so an ISP or address change shows up in the data
+# rather than as a separate file. Versions before 1.3 wrote one file per
+# IP (speed-<ip>.csv); _log_files still reads those alongside it.
+readonly LOG_FILE="$LOG_DIR/internet-speed.csv"
 readonly CRON_TAG="# internet-speed"
 readonly CSV_HEADER='Server ID,Sponsor,Server Name,Timestamp,Distance,Ping,Download,Upload,Share,IP Address'
 
@@ -45,7 +50,8 @@ USAGE
    $SCRIPT_NAME --version              Print version
 
 ENVIRONMENT
-   SPEED_LOG_DIR       Where to write CSV logs (default: ~/speed_logs)
+   SPEED_LOG_DIR       Directory for the CSV log, internet-speed.csv
+                       (default: ~/speed_logs)
    SPEED_PREFLIGHT_HOST host:port probed before each run so an "internet
                        is out" condition fails fast (default: 8.8.8.8:53;
                        set to an empty string to skip the probe)
@@ -140,13 +146,13 @@ cmd_run() {
    local row ip log_file
    row="$(speedtest-cli --csv --secure)"
 
-   # IP Address is the 10th (last) column. Pull it out for the per-IP log filename.
+   # IP Address is the 10th (last) column. Pull it out for the stdout line.
    ip="$(echo "$row" | awk -F, '{print $NF}' | tr -d '"')"
    if [[ -z "$ip" ]]; then
       ip="unknown"
    fi
 
-   log_file="$LOG_DIR/speed-$ip.csv"
+   log_file="$LOG_FILE"
    if [[ ! -f "$log_file" ]]; then
       echo "$CSV_HEADER" > "$log_file"
    fi
@@ -169,11 +175,7 @@ cmd_summary() {
       echo "$SCRIPT_NAME: summary takes no arguments (got: $*)" >&2
       exit 1
    fi
-   if [[ ! -d "$LOG_DIR" ]] || ! compgen -G "$LOG_DIR/speed-*.csv" > /dev/null; then
-      echo "$SCRIPT_NAME: no logs found in $LOG_DIR" >&2
-      echo "Run '$SCRIPT_NAME' first to collect some data." >&2
-      exit 1
-   fi
+   _require_logs
 
    local promised_down="${SPECTRUM_PROMISED_DOWN:-}"
    local promised_up="${SPECTRUM_PROMISED_UP:-}"
@@ -297,9 +299,29 @@ cmd_summary() {
    '
 }
 
-# Helper: emit the data portion of all per-IP CSV logs as a single
+# The log files to read, one path per line: internet-speed.csv (what
+# current versions write) followed by any legacy per-IP speed-<ip>.csv
+# files from versions before 1.3. Analysis concatenates them all, so
+# upgrading needs no migration. Prints nothing if there are no logs.
+_log_files() {
+   local f
+   for f in "$LOG_FILE" "$LOG_DIR"/speed-*.csv; do
+      [[ -f "$f" ]] && printf '%s\n' "$f"
+   done
+   return 0
+}
+
+_require_logs() {
+   if [[ -z "$(_log_files)" ]]; then
+      echo "$SCRIPT_NAME: no logs found in $LOG_DIR" >&2
+      echo "Run '$SCRIPT_NAME' first to collect some data." >&2
+      exit 1
+   fi
+}
+
+# Helper: emit the data portion of every log file as a single
 # time-sorted stream with quoted fields stripped so awk -F, works.
-# Used by cmd_summary and cmd_outages.
+# Used by cmd_summary, cmd_hours and cmd_outages.
 _load_rows_sorted() {
    # Header lines are dropped by the $4 == "Timestamp" test, which works
    # for every file in the concatenation. (A bare `NR > 1` here used to
@@ -307,7 +329,8 @@ _load_rows_sorted() {
    # LC_ALL=C keeps the ISO-8601 timestamp sort byte-wise and
    # locale-independent.
    # shellcheck disable=SC2016
-   cat "$LOG_DIR"/speed-*.csv \
+   local f
+   _log_files | while IFS= read -r f; do cat "$f"; done \
       | _strip_quoted \
       | awk -F, '$4 != "" && $4 != "Timestamp"' \
       | LC_ALL=C sort -t, -k4,4
@@ -318,10 +341,7 @@ cmd_hours() {
       echo "$SCRIPT_NAME: hours takes no arguments (got: $*)" >&2
       exit 1
    fi
-   if [[ ! -d "$LOG_DIR" ]] || ! compgen -G "$LOG_DIR/speed-*.csv" > /dev/null; then
-      echo "$SCRIPT_NAME: no logs found in $LOG_DIR" >&2
-      exit 1
-   fi
+   _require_logs
 
    local promised_down="${SPECTRUM_PROMISED_DOWN:-}"
 
@@ -370,10 +390,7 @@ cmd_outages() {
       echo "$SCRIPT_NAME: outages takes no arguments (got: $*)" >&2
       exit 1
    fi
-   if [[ ! -d "$LOG_DIR" ]] || ! compgen -G "$LOG_DIR/speed-*.csv" > /dev/null; then
-      echo "$SCRIPT_NAME: no logs found in $LOG_DIR" >&2
-      exit 1
-   fi
+   _require_logs
 
    local outage_down="${OUTAGE_DOWN_BELOW:-25}"
    local outage_ping="${OUTAGE_PING_ABOVE:-250}"
@@ -562,15 +579,19 @@ cmd_migrate() {
       esac
    done
 
-   if [[ ! -d "$LOG_DIR" ]] || ! compgen -G "$LOG_DIR/speed-*.csv" > /dev/null; then
-      echo "$SCRIPT_NAME: no logs found in $LOG_DIR" >&2
-      exit 1
-   fi
+   _require_logs
 
    local migrated=0 already=0 empty=0
-   for f in "$LOG_DIR"/speed-*.csv; do
-      local ip first
-      ip="${f##*/speed-}"; ip="${ip%.csv}"
+   local f
+   while IFS= read -r f; do
+      local base ip first
+      # Legacy semicolon rows carry no IP, so take it from a speed-<ip>.csv
+      # filename when there is one; otherwise leave the column empty.
+      base="${f##*/}"
+      case "$base" in
+         speed-*.csv) ip="${base#speed-}"; ip="${ip%.csv}" ;;
+         *)           ip="" ;;
+      esac
       first="$(grep -m1 -v '^$' "$f" 2>/dev/null || true)"
 
       if [[ -z "$first" ]]; then
@@ -629,7 +650,7 @@ cmd_migrate() {
       mv "$f.tmp" "$f"
       echo "  [migrated]   $f  ($original_rows → $converted_rows rows, backup: $f.bak)"
       (( ++migrated ))
-   done
+   done < <(_log_files)
 
    echo
    if (( dry_run )); then

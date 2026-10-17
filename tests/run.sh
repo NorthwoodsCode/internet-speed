@@ -68,7 +68,7 @@ fi
 
 TMP_LOG_DIR="$(mktemp -d)"
 TMP_TEST_DIR="$(mktemp -d)"
-cp "$SAMPLE_CSV" "$TMP_LOG_DIR/"
+cp "$SAMPLE_CSV" "$TMP_LOG_DIR/internet-speed.csv"
 
 export SPEED_LOG_DIR="$TMP_LOG_DIR"
 
@@ -101,9 +101,12 @@ assert "run prints the right numbers despite a comma in the server name" 0 \
    "ping=9.5ms down=413.3Mbps up=19.1Mbps ip=73.176.45.182" \
    env PATH="$FAKE_BIN:$PATH" SPEED_LOG_DIR="$RUN_DIR" SPEED_PREFLIGHT_HOST= "$SPEEDTEST" run
 assert "run creates a per-IP log with the CSV header" 0 "Server ID,Sponsor" \
-   head -1 "$RUN_DIR/speed-73.176.45.182.csv"
+   head -1 "$RUN_DIR/internet-speed.csv"
 assert "run appends the raw row unchanged" 0 '"Charlotte, NC"' \
-   tail -1 "$RUN_DIR/speed-73.176.45.182.csv"
+   tail -1 "$RUN_DIR/internet-speed.csv"
+assert "second run appends to the same file (header + 2 rows)" 0 "lines=3" \
+   bash -c 'env PATH="$1:$PATH" SPEED_LOG_DIR="$2" SPEED_PREFLIGHT_HOST= "$3" run >/dev/null \
+            && echo "lines=$(wc -l < "$2/internet-speed.csv" | tr -d " ")"' _ "$FAKE_BIN" "$RUN_DIR" "$SPEEDTEST"
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
    assert "run exits 2 when the preflight target is unreachable" 2 "network is down" \
       env PATH="$FAKE_BIN:$PATH" SPEED_LOG_DIR="$RUN_DIR" SPEED_PREFLIGHT_HOST=127.0.0.1:9 "$SPEEDTEST" run
@@ -154,11 +157,23 @@ assert "migrate left a .bak backup" 0 "" \
    test -f "$LEGACY_DIR/speed-10.0.0.1.csv.bak"
 assert "migrated file has the new CSV header" 0 "Server ID,Sponsor" \
    head -1 "$LEGACY_DIR/speed-10.0.0.1.csv"
+assert "migrate fills the IP column from a speed-<ip>.csv filename" 0 ",10.0.0.1<end>" \
+   bash -c 'echo "$(tail -1 "$1")<end>"' _ "$LEGACY_DIR/speed-10.0.0.1.csv"
+
+# legacy rows in a file whose name carries no IP: the IP column stays empty
+NOIP_DIR="$TMP_TEST_DIR/legacy-noip"
+mkdir -p "$NOIP_DIR"
+printf '2021-08-11;08:03:00;5.3;350.00;18.01\n' > "$NOIP_DIR/internet-speed.csv"
+assert "migrate converts a legacy-format internet-speed.csv" 0 "[migrated]" \
+   env SPEED_LOG_DIR="$NOIP_DIR" "$SPEEDTEST" migrate
+assert "migrate leaves the IP column empty when the filename has none" 0 \
+   "row=,,,2021-08-11T08:03:00Z,,5.3,350000000,18010000,,<end>" \
+   bash -c 'echo "row=$(tail -1 "$1")<end>"' _ "$NOIP_DIR/internet-speed.csv"
 
 # empty-file edge case (regression test for the (( var++ )) bug)
 EMPTY_DIR="$TMP_TEST_DIR/empty"
 mkdir -p "$EMPTY_DIR"
-touch "$EMPTY_DIR/speed-0.0.0.0.csv"
+touch "$EMPTY_DIR/internet-speed.csv"
 assert "migrate on empty file exits 0" 0 "[empty]" \
    env SPEED_LOG_DIR="$EMPTY_DIR" "$SPEEDTEST" migrate
 
@@ -217,9 +232,25 @@ assert "migrate on missing log dir exits 1" 1 "no logs found" \
 
 NOHDR_DIR="$TMP_TEST_DIR/nohdr"
 mkdir -p "$NOHDR_DIR"
-tail -n +2 "$SAMPLE_CSV" | head -3 > "$NOHDR_DIR/speed-1.1.1.1.csv"
+tail -n +2 "$SAMPLE_CSV" | head -3 > "$NOHDR_DIR/internet-speed.csv"
 assert "summary counts every row of a header-less log" 0 "samples:  3" \
    env SPEED_LOG_DIR="$NOHDR_DIR" "$SPEEDTEST" summary
+
+# ---------- mixed naming: new single log + legacy per-IP logs are read together ----------
+
+MIXED_DIR="$TMP_TEST_DIR/mixed"
+mkdir -p "$MIXED_DIR"
+head -4 "$SAMPLE_CSV" > "$MIXED_DIR/internet-speed.csv"                                   # header + 3 rows
+{ head -1 "$SAMPLE_CSV"; sed -n '5,6p' "$SAMPLE_CSV"; } > "$MIXED_DIR/speed-73.176.45.182.csv"  # header + 2 rows
+assert "summary reads internet-speed.csv and legacy speed-<ip>.csv together" 0 "samples:  5" \
+   env SPEED_LOG_DIR="$MIXED_DIR" "$SPEEDTEST" summary
+assert "outages reads both naming styles too" 0 "(no outages detected)" \
+   env SPEED_LOG_DIR="$MIXED_DIR" "$SPEEDTEST" outages
+assert "plot.py finds both naming styles" 0 "files=2" \
+   env SPEED_LOG_DIR="$MIXED_DIR" python3 -c '
+import sys; sys.path.insert(0, sys.argv[1])
+import plot
+print("files=%d" % len(plot.find_csvs(None)))' "$REPO_DIR"
 
 # ---------- Python tools (none of these need matplotlib) ----------
 
