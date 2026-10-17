@@ -6,7 +6,11 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=@SCRIPT_PATH@
+# Quoted so a checkout under a directory with spaces still works.
+ExecStart="@SCRIPT_PATH@"
 Nice=10
-# Pass through env vars if set in the user's environment.
+# A `systemctl --user` service does NOT inherit ~/.bashrc exports.
+# `speedtest.sh install-systemd` appends an Environment= line for
+# SPEED_LOG_DIR when it is set at install time. PassEnvironment only
+# helps if you have run `systemctl --user import-environment ...`.
 PassEnvironment=SPEED_LOG_DIR SPECTRUM_PROMISED_DOWN SPECTRUM_PROMISED_UP

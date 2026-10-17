@@ -110,6 +110,7 @@ the whole point — that's the ammo for a complaint email.
 | **Required** | `speedtest-cli` (the Python one by sivel)  | `apt install speedtest-cli` / `brew install speedtest-cli` / `pip install speedtest-cli`    |
 | Optional     | `python3` + `matplotlib`                   | only for `plot.py` (PNG export) and `report.py` (monthly PDF). See install notes below.     |
 | Optional     | `cron` or `systemd`                        | only if you want scheduled runs (`install-cron` / `install-systemd`)                        |
+| Optional     | `timeout` (GNU coreutils)                  | 3-second network preflight before each run. Preinstalled on Linux; on macOS `brew install coreutils` provides `gtimeout`. Skipped if absent. |
 
 > ⚠️ There are two unrelated tools called "speedtest" — Ookla's official binary and
 > [sivel's Python `speedtest-cli`](https://github.com/sivel/speedtest-cli). This repo
@@ -145,7 +146,7 @@ chmod +x speedtest.sh
 Optional — put it on PATH:
 
 ```bash
-ln -s "$(pwd)/speedtest.sh" ~/.local/bin/mint-speedtest
+ln -s "$(pwd)/speedtest.sh" ~/.local/bin/internet-speed
 ```
 
 ---
@@ -177,14 +178,16 @@ Pick one — they all do the same thing.
 ```
 
 Adds an idempotent line tagged `# internet-speed` to your crontab.
-Re-run with `--uninstall` to remove.
+Re-run with `--uninstall` to remove. If `SPEED_LOG_DIR` is set in your
+shell when you run this, it is baked into the entry (cron does not read
+`~/.bashrc`, so the job would otherwise log somewhere `summary` doesn't look).
 
 ### Option B — manual cron
 
 Print the exact line for your install with:
 
 ```bash
-echo "*/30 * * * * $(pwd)/speedtest.sh >/dev/null 2>&1"
+echo "*/30 * * * * \"$(pwd)/speedtest.sh\" >/dev/null 2>&1"
 ```
 
 Then `crontab -e` and paste. Replace `*/30` with `*/15` for 15-min intervals,
@@ -194,11 +197,13 @@ or `0 */2` for every 2 hours.
 
 ```bash
 ./speedtest.sh install-systemd
-systemctl --user list-timers | grep mint
+systemctl --user list-timers | grep internet-speed
 ```
 
 The timer fires 5 minutes after boot and every 30 minutes thereafter, with
-`Persistent=true` to catch up after laptop sleep.
+`Persistent=true` to catch up after laptop sleep. As with cron, a
+`systemctl --user` service does not see `~/.bashrc` exports; `install-systemd`
+bakes `SPEED_LOG_DIR` into the generated unit if it is set at install time.
 
 ---
 
@@ -284,6 +289,7 @@ Download and Upload are in **bits/sec** (divide by 1,000,000 for Mbps).
 | Env var                  | Default          | Purpose                                          |
 | ------------------------ | ---------------- | ------------------------------------------------ |
 | `SPEED_LOG_DIR`     | `~/speed_logs/`  | Where CSV logs go                                |
+| `SPEED_PREFLIGHT_HOST` | `8.8.8.8:53`  | `host:port` probed before each run so an "internet is out" condition fails fast. Set to an empty string to skip the probe. |
 | `SPECTRUM_PROMISED_DOWN` | _(unset)_        | Your plan's promised down in Mbps                |
 | `SPECTRUM_PROMISED_UP`   | _(unset)_        | Your plan's promised up in Mbps                  |
 | `OUTAGE_DOWN_BELOW` | `25`             | Outage threshold: download < N Mbps              |
@@ -350,25 +356,36 @@ drag your CSV onto the page.
 You haven't run `./speedtest.sh` yet, or you set `SPEED_LOG_DIR` to
 the wrong place. Check `~/speed_logs/` for files named `speed-<ip>.csv`.
 
-**`./speedtest.sh: realpath: command not found` on macOS**  
-Install coreutils: `brew install coreutils`. macOS's BSD userland doesn't
-ship `realpath` by default.
+**No "network is down" message on macOS even when offline**  
+The 3-second preflight needs GNU `timeout`, which stock macOS lacks, so the
+script skips the probe and lets `speedtest-cli` fail on its own (slower, same
+result). `brew install coreutils` provides `gtimeout`, which is picked up
+automatically.
 
-**Cron job runs but no rows appear in the log**  
-Cron has a minimal environment — your `SPECTRUM_PROMISED_*` exports from
-`~/.bashrc` aren't visible. The data still gets logged (those env vars
-only affect summary/charts, not collection). Check
-`MAILTO=you@example.com` in your crontab to see the actual output of cron
-runs.
+**`network is down (couldn't reach 8.8.8.8:53)` but the internet works**  
+Your network blocks outbound DNS to Google. Point the probe somewhere else
+with `SPEED_PREFLIGHT_HOST=1.1.1.1:53`, or set it to an empty string to skip
+the probe entirely.
+
+**Cron or systemd job runs but no rows appear in the log**  
+Cron and `systemctl --user` both have a minimal environment — exports from
+`~/.bashrc` aren't visible. `SPECTRUM_PROMISED_*` only affect summary/charts,
+not collection, so the data still gets logged. `SPEED_LOG_DIR` *does* affect
+collection: `install-cron` and `install-systemd` bake it in if it is set when
+you run them, otherwise the job logs to `~/speed_logs/`. Re-run the install
+command with the variable set to fix an existing entry. For cron, set
+`MAILTO=you@example.com` in your crontab to see the actual output of runs.
 
 **`./speedtest.sh hours` shows different worst-hour than the dashboard**  
 The bash `summary` and `hours` subcommands bucket by **UTC** hour
-(extracted from the ISO timestamp via substring); the HTML dashboard,
-`plot.py`, and `report.py` bucket by **local** hour (browser/Python
-converts the ISO timestamp). If your timezone is offset from UTC,
-they'll disagree by the offset. The dashboard/plot/report numbers are
-what you usually want; the bash output is labeled "(UTC)" to make this
-obvious. Will be unified in a future version.
+(extracted from the ISO timestamp via substring, since there is no portable
+way to convert timezones in bash/awk). The HTML dashboard, `plot.py`, and
+`report.py` convert each timestamp to your **local** timezone first, so
+their time axes, hour-of-day buckets, and `24h`/`7d`/`--days`/`--month`
+windows are all in local time. If your timezone is offset from UTC, the
+bash output will differ from the others by exactly that offset; it is
+labeled "(UTC)" to make this obvious. The dashboard/plot/report numbers
+are what you usually want.
 
 ---
 
@@ -378,19 +395,14 @@ Smoke tests for every subcommand, exercising the committed sample CSV
 plus synthetic legacy data for migration:
 
 ```bash
-./tests/run.sh           # 26 tests, ~2 seconds
+./tests/run.sh           # 40+ tests, ~2 seconds
 VERBOSE=1 ./tests/run.sh # dump full output of every command
 ```
 
-CI runs them on every push and PR (see `.github/workflows/ci.yml`).
-
----
-
-## Naming
-
-The `mint-` prefix is historical — the tool was first built on Linux Mint.
-It works on any distro with bash and `speedtest-cli`, and on macOS if you've
-installed `coreutils` (for `realpath`).
+`speedtest-cli` and `crontab` are stubbed with tiny scripts on `PATH`, so the
+`run` and `install-cron` paths are exercised without a network connection or
+touching your real crontab. CI runs the suite on Ubuntu and macOS plus
+`shellcheck` on every push and PR (see `.github/workflows/ci.yml`).
 
 ---
 

@@ -14,6 +14,14 @@ and color-codes the hour-of-day bars red/orange/green.
 Outage windows (down < OUTAGE_DOWN_BELOW or ping >
 OUTAGE_PING_ABOVE; defaults 25 Mbps / 250 ms) are shaded red
 across the time-series panels and counted in the title.
+
+Timestamps in the CSV are UTC (speedtest-cli writes them with a trailing
+"Z"). They are converted to local time on load, so the time axes, the
+--days window and the hour-of-day buckets all follow this machine's
+timezone.
+
+This module doubles as the shared library for report.py: everything
+below that isn't prefixed with an underscore is imported there.
 """
 
 from __future__ import annotations
@@ -25,12 +33,32 @@ import os
 import sys
 from pathlib import Path
 
-DEFAULT_LOG_DIR = Path(os.environ.get("SPEED_LOG_DIR", Path.home() / "speed_logs"))
-OUTAGE_DOWN_BELOW = float(os.environ.get("OUTAGE_DOWN_BELOW", "25"))
-OUTAGE_PING_ABOVE = float(os.environ.get("OUTAGE_PING_ABOVE", "250"))
+PROG = Path(sys.argv[0]).name or "plot.py"
 
 
-def _import_matplotlib():
+def env_float(name: str, default: float | None = None) -> float | None:
+    """Read a numeric env var. Unset/empty -> default; junk -> clean exit."""
+    raw = os.environ.get(name, "")
+    if raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        sys.exit(f"{PROG}: {name} must be a number, got '{raw}'")
+
+
+DEFAULT_LOG_DIR = Path(os.environ.get("SPEED_LOG_DIR") or Path.home() / "speed_logs")
+OUTAGE_DOWN_BELOW = env_float("OUTAGE_DOWN_BELOW", 25.0)
+OUTAGE_PING_ABOVE = env_float("OUTAGE_PING_ABOVE", 250.0)
+
+
+def promised_from_env() -> tuple[float | None, float | None]:
+    """(promised_down, promised_up) in Mbps; None where unset or zero."""
+    return (env_float("SPECTRUM_PROMISED_DOWN") or None,
+            env_float("SPECTRUM_PROMISED_UP") or None)
+
+
+def import_matplotlib():
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -39,8 +67,8 @@ def _import_matplotlib():
         return plt, mdates
     except ImportError:
         sys.exit(
-            "plot.py: matplotlib is required.\n"
-            "Install with: pip install --user matplotlib"
+            f"{PROG}: matplotlib is required.\n"
+            "Install with: apt install python3-matplotlib  (or pip install matplotlib in a venv)"
         )
 
 
@@ -69,14 +97,32 @@ def parse_args() -> argparse.Namespace:
 def find_csvs(csv_arg: Path | None) -> list[Path]:
     if csv_arg:
         if not csv_arg.exists():
-            sys.exit(f"plot.py: {csv_arg} not found")
+            sys.exit(f"{PROG}: {csv_arg} not found")
         return [csv_arg]
     if not DEFAULT_LOG_DIR.exists():
-        sys.exit(f"plot.py: log dir {DEFAULT_LOG_DIR} does not exist. Run speedtest.sh first.")
+        sys.exit(f"{PROG}: log dir {DEFAULT_LOG_DIR} does not exist. Run speedtest.sh first.")
     paths = sorted(DEFAULT_LOG_DIR.glob("speed-*.csv"))
     if not paths:
-        sys.exit(f"plot.py: no speed-*.csv files in {DEFAULT_LOG_DIR}. Run speedtest.sh first.")
+        sys.exit(f"{PROG}: no speed-*.csv files in {DEFAULT_LOG_DIR}. Run speedtest.sh first.")
     return paths
+
+
+def parse_timestamp(raw: str) -> dt.datetime:
+    """speedtest-cli timestamp (ISO 8601 UTC, trailing Z) -> naive *local* datetime.
+
+    Naive-local is what matplotlib, hour-of-day bucketing and the
+    --days / --month filters all want to work in. Stripping the Z and
+    parsing naively (the old behaviour) silently kept the UTC wall clock,
+    which mislabelled every axis and shifted every window by the offset.
+    """
+    text = raw.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"  # fromisoformat only accepts "Z" on 3.11+
+    ts = dt.datetime.fromisoformat(text)
+    if ts.tzinfo is None:
+        # No offset in the string at all: speedtest-cli timestamps are UTC.
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone().replace(tzinfo=None)
 
 
 def load_rows(paths: list[Path]) -> tuple[list[dt.datetime], list[float], list[float], list[float]]:
@@ -90,7 +136,7 @@ def load_rows(paths: list[Path]) -> tuple[list[dt.datetime], list[float], list[f
                 if len(row) < 10:
                     continue
                 try:
-                    ts = dt.datetime.fromisoformat(row[3].rstrip("Z"))
+                    ts = parse_timestamp(row[3])
                     ping = float(row[5])
                     down = float(row[6]) / 1_000_000  # bits -> Mbps
                     up = float(row[7]) / 1_000_000
@@ -133,6 +179,26 @@ def detect_outages(times, pings, downs):
     return events
 
 
+def sample_interval(times: list[dt.datetime]) -> dt.timedelta:
+    """Median gap between consecutive samples (30 min if it can't be told)."""
+    gaps = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+    if not gaps:
+        return dt.timedelta(minutes=30)
+    return gaps[len(gaps) // 2]
+
+
+def outage_spans(times, outages) -> list[tuple[dt.datetime, dt.datetime]]:
+    """Turn (start_idx, end_idx) events into (t0, t1) windows to shade.
+
+    Each window is padded by half the sampling interval on both sides so a
+    single bad sample still renders as a visible band. Without padding a
+    one-sample outage has start == end and draws as a zero-width line,
+    i.e. nothing.
+    """
+    half = sample_interval(times) / 2
+    return [(times[s] - half, times[e] + half) for s, e in outages]
+
+
 def hour_means(times, downs):
     """Return [(hour, mean_down, count)] for hours 0-23 with samples."""
     by_hour = [(0.0, 0)] * 24
@@ -148,17 +214,17 @@ def main() -> int:
     paths = find_csvs(args.csv)
     times, pings, downs, ups = load_rows(paths)
     if not times:
-        sys.exit("plot.py: no data rows found")
+        sys.exit(f"{PROG}: no data rows found")
     if args.days:
         times, pings, downs, ups = filter_days(times, pings, downs, ups, args.days)
         if not times:
-            sys.exit(f"plot.py: no data in the last {args.days} days")
+            sys.exit(f"{PROG}: no data in the last {args.days} days")
 
-    promised_down = float(os.environ.get("SPECTRUM_PROMISED_DOWN", "0")) or None
-    promised_up = float(os.environ.get("SPECTRUM_PROMISED_UP", "0")) or None
+    promised_down, promised_up = promised_from_env()
     outages = detect_outages(times, pings, downs)
+    spans = outage_spans(times, outages)
 
-    plt, mdates = _import_matplotlib()
+    plt, mdates = import_matplotlib()
     fig = plt.figure(figsize=(12, 12), constrained_layout=True)
     gs = fig.add_gridspec(4, 1, height_ratios=[1, 1, 1, 0.8])
     ax_down = fig.add_subplot(gs[0])
@@ -167,10 +233,10 @@ def main() -> int:
     ax_hours = fig.add_subplot(gs[3])
     fig.suptitle(_make_title(times, downs, ups, promised_down, promised_up, outages), fontsize=13)
 
-    _plot_metric(ax_down, times, downs, "Download (Mbps)", "tab:blue", promised_down, outages)
-    _plot_metric(ax_up, times, ups, "Upload (Mbps)", "tab:green", promised_up, outages)
-    _plot_metric(ax_ping, times, pings, "Ping (ms)", "tab:orange", None, outages)
-    _plot_hours(ax_hours, hour_means(times, downs), promised_down)
+    plot_metric(ax_down, times, downs, "Download (Mbps)", "tab:blue", promised_down, spans)
+    plot_metric(ax_up, times, ups, "Upload (Mbps)", "tab:green", promised_up, spans)
+    plot_metric(ax_ping, times, pings, "Ping (ms)", "tab:orange", None, spans)
+    plot_hours(ax_hours, hour_means(times, downs), promised_down)
 
     ax_ping.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
     fig.autofmt_xdate()
@@ -180,21 +246,32 @@ def main() -> int:
     return 0
 
 
-def _plot_metric(ax, times, values, label, color, baseline, outages):
-    ax.plot(times, values, color=color, linewidth=1.2, marker=".", markersize=3)
-    ax.set_ylabel(label)
+def plot_metric(ax, times, values, label, color, baseline, spans, compact=False):
+    """Time-series line with optional promised baseline and outage shading.
+
+    compact=True is the denser styling the one-page PDF report uses
+    (smaller fonts/markers, no below-baseline fill).
+    """
+    ax.plot(times, values, color=color,
+            linewidth=1.0 if compact else 1.2,
+            marker=".", markersize=2 if compact else 3)
+    ax.set_ylabel(label, **({"fontsize": 9} if compact else {}))
+    if compact:
+        ax.tick_params(labelsize=8)
     ax.grid(True, alpha=0.3)
     if baseline is not None:
         ax.axhline(baseline, color="red", linestyle="--", linewidth=1, label=f"promised: {baseline:g}")
-        ax.fill_between(times, 0, baseline, where=[v < baseline for v in values],
-                        color="red", alpha=0.1, interpolate=False)
-        ax.legend(loc="lower right", fontsize=9)
-    # Outage shading: vertical span per event.
-    for start, end in outages:
-        ax.axvspan(times[start], times[end], color="red", alpha=0.18, zorder=0)
+        if not compact:
+            ax.fill_between(times, 0, baseline, where=[v < baseline for v in values],
+                            color="red", alpha=0.1, interpolate=False)
+        ax.legend(loc="lower right", fontsize=8 if compact else 9)
+    # Outage shading: one vertical band per (padded) event.
+    for t0, t1 in spans:
+        ax.axvspan(t0, t1, color="red", alpha=0.18, zorder=0)
 
 
-def _plot_hours(ax, hour_data, baseline):
+def plot_hours(ax, hour_data, baseline, compact=False):
+    """Mean-download-by-hour bar chart, colour-coded against the baseline."""
     hours = [h for h, _, _ in hour_data]
     means = [m if m is not None else 0 for _, m, _ in hour_data]
     counts = [n for _, _, n in hour_data]
@@ -213,12 +290,18 @@ def _plot_hours(ax, hour_data, baseline):
     ax.bar(hours, means, color=colors, width=0.85)
     if baseline is not None:
         ax.axhline(baseline, color="red", linestyle="--", linewidth=1, label=f"promised: {baseline:g}")
-        ax.legend(loc="lower right", fontsize=9)
-    ax.set_xticks(range(24))
-    ax.set_xticklabels([f"{h:02d}" for h in range(24)], fontsize=8)
-    ax.set_xlabel("hour of day")
-    ax.set_ylabel("Mean download (Mbps)")
-    ax.set_title("Mean download by hour-of-day", loc="left", fontsize=11)
+        if not compact:
+            ax.legend(loc="lower right", fontsize=9)
+    step = 3 if compact else 1
+    ax.set_xticks(range(0, 24, step))
+    ax.set_xticklabels([f"{h:02d}" for h in range(0, 24, step)], fontsize=8)
+    small = {"fontsize": 9} if compact else {}
+    ax.set_xlabel("hour of day", **small)
+    ax.set_ylabel("Mean down (Mbps)" if compact else "Mean download (Mbps)", **small)
+    ax.set_title("By hour-of-day" if compact else "Mean download by hour-of-day",
+                 loc="left", fontsize=10 if compact else 11)
+    if compact:
+        ax.tick_params(labelsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
 

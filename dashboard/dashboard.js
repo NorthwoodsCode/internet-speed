@@ -3,7 +3,7 @@
 // CSV loading priority:
 //   1. ?csv=URL query param  → fetch that
 //   2. ./speed.csv next to index.html  → fetch
-//   3. ../examples/sample.csv  → fetch (so GitHub Pages demo works)
+//   3. ../examples/speed-sample.csv  → fetch (so GitHub Pages demo works)
 //   4. Drag/drop or file picker
 //
 // Promised baseline:
@@ -29,8 +29,39 @@ const state = {
 // Outage thresholds (same defaults as the bash script).
 // Override via URL params: ?outage_down=200&outage_ping=50
 const URL_PARAMS = new URLSearchParams(location.search);
-const OUTAGE_DOWN_BELOW = parseFloat(URL_PARAMS.get("outage_down")) || 25;
-const OUTAGE_PING_ABOVE = parseFloat(URL_PARAMS.get("outage_ping")) || 250;
+
+// Numeric URL param with a fallback. Unlike `parseFloat(x) || fallback`
+// this lets an explicit 0 through (e.g. ?outage_down=0 to disable the
+// download-based outage rule).
+function numParam(name, fallback) {
+   const raw = URL_PARAMS.get(name);
+   if (raw === null || raw.trim() === "") return fallback;
+   const v = parseFloat(raw);
+   return Number.isFinite(v) ? v : fallback;
+}
+
+const OUTAGE_DOWN_BELOW = numParam("outage_down", 25);
+const OUTAGE_PING_ABOVE = numParam("outage_ping", 250);
+
+// localStorage can throw (private browsing, blocked storage). Treat it as
+// a best-effort convenience rather than a hard dependency.
+function storageGet(key) {
+   try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function storageSet(key, value) {
+   try { localStorage.setItem(key, value); } catch (e) { /* ignore */ }
+}
+function storageRemove(key) {
+   try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+}
+
+// Rebuilding four Chart.js instances on every keystroke in the promised
+// inputs is wasteful; coalesce rapid edits into a single render.
+let renderTimer = null;
+function scheduleRender(delayMs = 150) {
+   clearTimeout(renderTimer);
+   renderTimer = setTimeout(render, delayMs);
+}
 
 // ---------- bootstrap ----------
 
@@ -83,8 +114,7 @@ function parseCSV(text) {
       const cols = splitCsvLine(lines[i]);
       if (i === 0 && cols[0] === "Server ID") continue;
       if (cols.length < 10) continue;
-      const tsStr = cols[CSV_COLS.timestamp].replace(/Z$/, "");
-      const ts = new Date(tsStr);
+      const ts = parseTimestamp(cols[CSV_COLS.timestamp]);
       const ping = parseFloat(cols[CSV_COLS.ping]);
       const down = parseFloat(cols[CSV_COLS.download]) / 1e6;
       const up = parseFloat(cols[CSV_COLS.upload]) / 1e6;
@@ -116,6 +146,17 @@ function splitCsvLine(line) {
    return cols;
 }
 
+// speedtest-cli writes ISO 8601 UTC timestamps with a trailing "Z". Keep
+// the Z (or any explicit offset) so the browser treats the value as the
+// instant it is and renders it in local time. A bare date-time with no
+// zone designator is parsed as *local* per ECMA-262, which used to shift
+// every point, axis label and range filter by the UTC offset.
+function parseTimestamp(raw) {
+   const s = String(raw).trim();
+   const hasZone = /(?:[Zz]|[+-]\d{2}:?\d{2})$/.test(s);
+   return new Date(hasZone ? s : s + "Z");
+}
+
 // ---------- config / inputs ----------
 
 function restorePromisedInputs() {
@@ -124,8 +165,8 @@ function restorePromisedInputs() {
    const upInput = document.getElementById("promised-up");
    const urlDown = params.get("down");
    const urlUp = params.get("up");
-   const storedDown = localStorage.getItem("promised-down");
-   const storedUp = localStorage.getItem("promised-up");
+   const storedDown = storageGet("promised-down");
+   const storedUp = storageGet("promised-up");
 
    downInput.value = urlDown || storedDown || "";
    upInput.value = urlUp || storedUp || "";
@@ -140,9 +181,9 @@ function wireConfigInputs() {
          const v = parseFloat(input.value) || null;
          const key = id === "promised-down" ? "down" : "up";
          state.promised[key] = v;
-         if (v) localStorage.setItem(id, input.value);
-         else localStorage.removeItem(id);
-         render();
+         if (v) storageSet(id, input.value);
+         else storageRemove(id);
+         scheduleRender();
       });
    }
 }
@@ -314,11 +355,31 @@ function hourOfDayStats(rows) {
    }));
 }
 
+// Median gap between consecutive samples in ms (30 min if it can't be told).
+function sampleInterval(rows) {
+   const gaps = [];
+   for (let i = 1; i < rows.length; i++) {
+      const g = rows[i].ts - rows[i - 1].ts;
+      if (g > 0) gaps.push(g);
+   }
+   if (!gaps.length) return 30 * 60 * 1000;
+   gaps.sort((a, b) => a - b);
+   return gaps[Math.floor(gaps.length / 2)];
+}
+
+// Widen each outage window by half a sampling interval on both sides so a
+// single bad sample still draws as a visible band. Without this a
+// one-sample outage has start === end and renders as a zero-width line.
+function padOutages(events, intervalMs) {
+   const half = intervalMs / 2;
+   return events.map(o => ({ start: new Date(o.start - half), end: new Date(o.end + half) }));
+}
+
 // ---------- rendering ----------
 
 function render() {
    renderStats();
-   const outages = detectOutages(state.filtered);
+   const outages = padOutages(detectOutages(state.filtered), sampleInterval(state.filtered));
    renderChart("chart-down", "Download (Mbps)", state.filtered.map(r => ({ x: r.ts, y: r.down })), "#58a6ff", state.promised.down, outages);
    renderChart("chart-up", "Upload (Mbps)", state.filtered.map(r => ({ x: r.ts, y: r.up })), "#3fb950", state.promised.up, outages);
    renderChart("chart-ping", "Ping (ms)", state.filtered.map(r => ({ x: r.ts, y: r.ping })), "#d29922", null, outages);
