@@ -612,6 +612,10 @@ cmd_migrate() {
       converted="$(
          awk -F';' -v ip="$ip" '
          {
+            # Strip a trailing CR first: a legacy log with Windows line
+            # endings otherwise matches no pattern below and migrates to a
+            # header-only file while reporting success.
+            sub(/\r$/, "")
             # If line has 10+ commas (new format), pass through unchanged.
             n_comma = gsub(/,/, ",", $0)
             if (n_comma >= 9) { print $0; next }

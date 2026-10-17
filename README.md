@@ -84,17 +84,18 @@ internet-speed summary
   metric          min   median     mean      max
   ping (ms)       7.0     11.7     14.4     58.9
   down (Mbps)    124.0    402.1    384.0    431.7
-  up (Mbps)       13.0     20.5     20.1     22.0
+  up (Mbps)      13.0     20.5     20.1     22.0
 
   below promised down (400 Mbps):  157 / 337 samples  (46.6%)
-  below promised up   (20 Mbps):   123 / 337 samples  (36.5%)
+  below promised up   (20 Mbps):  123 / 337 samples  (36.5%)
 
   outages:  0 (thresholds: down < 25 Mbps or ping > 250 ms)
 
-  worst hours (by mean download):
+  worst hours (UTC, by mean download):
     08:00 → 09:00    286.0 Mbps mean down  (14 samples)
     07:00 → 08:00    307.2 Mbps mean down  (14 samples)
     06:00 → 07:00    312.5 Mbps mean down  (14 samples)
+            run `speedtest.sh hours` for the full 24-hour breakdown
 ```
 
 The "46.6% below promised" and "08:00-09:00 is the worst hour" lines are

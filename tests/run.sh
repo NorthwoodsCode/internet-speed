@@ -46,7 +46,10 @@ assert() {
       TESTS_FAILED=$((TESTS_FAILED + 1))
       return
    fi
-   if [[ -n "$expect_match" ]] && ! echo "$out" | grep -qF "$expect_match"; then
+   # Here-string rather than `echo "$out" | grep -q`: under pipefail, grep -q
+   # can exit on the first matching line and SIGPIPE echo's next write, which
+   # turned a matching multi-line output into a spurious FAIL (~3-6 per 20k).
+   if [[ -n "$expect_match" ]] && ! grep -qF "$expect_match" <<<"$out"; then
       printf "FAIL  %s — output did not contain: %s\n" "$name" "$expect_match"
       [[ -z "${VERBOSE:-}" ]] && echo "$out" | head -5 | sed 's/^/    /'
       TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -100,7 +103,7 @@ RUN_DIR="$TMP_TEST_DIR/run"
 assert "run prints the right numbers despite a comma in the server name" 0 \
    "ping=9.5ms down=413.3Mbps up=19.1Mbps ip=73.176.45.182" \
    env PATH="$FAKE_BIN:$PATH" SPEED_LOG_DIR="$RUN_DIR" SPEED_PREFLIGHT_HOST= "$SPEEDTEST" run
-assert "run creates a per-IP log with the CSV header" 0 "Server ID,Sponsor" \
+assert "run creates internet-speed.csv with the CSV header" 0 "Server ID,Sponsor" \
    head -1 "$RUN_DIR/internet-speed.csv"
 assert "run appends the raw row unchanged" 0 '"Charlotte, NC"' \
    tail -1 "$RUN_DIR/internet-speed.csv"
@@ -169,6 +172,15 @@ assert "migrate converts a legacy-format internet-speed.csv" 0 "[migrated]" \
 assert "migrate leaves the IP column empty when the filename has none" 0 \
    "row=,,,2021-08-11T08:03:00Z,,5.3,350000000,18010000,,<end>" \
    bash -c 'echo "row=$(tail -1 "$1")<end>"' _ "$NOIP_DIR/internet-speed.csv"
+
+# legacy rows with Windows line endings must convert, not silently vanish
+CRLF_DIR="$TMP_TEST_DIR/legacy-crlf"
+mkdir -p "$CRLF_DIR"
+printf '2021-08-11;08:03:00;5.3;350.00;18.01\r\n2021-08-12;09:06:00;5.6;360.00;19.00\r\n' > "$CRLF_DIR/speed-10.0.0.2.csv"
+assert "migrate converts CRLF legacy rows instead of dropping them" 0 "(2 → 2 rows" \
+   env SPEED_LOG_DIR="$CRLF_DIR" "$SPEEDTEST" migrate
+assert "migrated CRLF file has header + 2 data rows, LF only" 0 "lines=3 cr=0" \
+   bash -c 'echo "lines=$(wc -l < "$1" | tr -d " ") cr=$(tr -cd "\r" < "$1" | wc -c | tr -d " ")"' _ "$CRLF_DIR/speed-10.0.0.2.csv"
 
 # empty-file edge case (regression test for the (( var++ )) bug)
 EMPTY_DIR="$TMP_TEST_DIR/empty"
