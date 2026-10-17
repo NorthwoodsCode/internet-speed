@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--csv",
         type=Path,
-        help="CSV file (default: all speed-*.csv in SPEED_LOG_DIR)",
+        help="CSV file (default: every log in SPEED_LOG_DIR)",
     )
     p.add_argument(
         "--output",
