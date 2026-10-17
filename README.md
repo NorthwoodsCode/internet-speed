@@ -54,7 +54,7 @@ That's it for the bash side. For PNG charts or PDF reports, see
 - **Bash collector** — appends one row per run to a per-IP CSV log
 - **HTML dashboard** — interactive Chart.js with time-series, hour-of-day
   bars, outage shading, and color-coded stat cards  
-  → **[live demo](https://NorthwoodsCode.github.io/internet-speed/dashboard/)** (loads `examples/speed-sample.csv`)
+  → **[live demo](https://NorthwoodsCode.github.io/internet-speed/dashboard/)** (sample data only — loads `examples/speed-sample.csv`)
 - **Static PNG export** — `python3 plot.py` for screenshot-style charts
 - **Monthly PDF report** — `python3 report.py` for a one-page summary you
   can attach to a complaint email
@@ -221,6 +221,15 @@ python3 -m http.server 8000
 Drop your `~/speed_logs/speed-<ip>.csv` into the page (or copy it next to
 `dashboard/index.html` as `speed.csv` and refresh). Try the live demo to see
 what it looks like: <https://NorthwoodsCode.github.io/internet-speed/dashboard/>
+
+The live demo is GitHub Pages serving this repo's `master` branch, and it shows
+**sample data only** (`examples/speed-sample.csv`). Don't commit your own logs
+to get them on there: the `speed-<ip>.csv` filename exposes your public IP, and
+the samples reveal when you're home and online. `.gitignore` blocks `*.csv`
+outside `examples/` for exactly that reason. Dropping a file onto the page, even
+the live one, never uploads anything; parsing happens entirely in your browser.
+(The empty `.nojekyll` file at the repo root tells Pages to publish the files
+as-is instead of running them through Jekyll.)
 
 Features:
 
