@@ -106,8 +106,11 @@ def main() -> int:
     plt, mdates = import_matplotlib()
     # A4 portrait at 100 dpi is roughly 8.27 x 11.69 inches.
     fig = plt.figure(figsize=(8.27, 11.69))
+    # The stats block (row index 1) holds up to eight 9-pt text rows and
+    # needs about 1.5 in. At a 0.6 share it got 0.84 in, i.e. 7.6 pt per
+    # row, so the bold labels overlapped the next line. 1.2 gives 13.6 pt.
     gs = fig.add_gridspec(
-        6, 1, height_ratios=[0.4, 0.6, 1.0, 1.0, 1.0, 1.2],
+        6, 1, height_ratios=[0.4, 1.2, 1.0, 1.0, 1.0, 1.2],
         hspace=0.55, left=0.07, right=0.96, top=0.96, bottom=0.05,
     )
 
