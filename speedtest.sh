@@ -10,12 +10,15 @@ set -euo pipefail
 IFS=$'\n\t'
 
 readonly VERSION="1.2.0"
-readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+# Assign first, then mark readonly: `readonly X="$(cmd)"` would mask a
+# failing $(cmd) (shellcheck SC2155), and set -e could never catch it.
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 # Resolve script path without depending on `realpath` (GNU coreutils,
 # not on macOS by default). `cd` + `pwd` gives an absolute path that
 # works on every POSIX shell.
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+readonly SCRIPT_NAME SCRIPT_DIR SCRIPT_PATH
 readonly LOG_DIR="${SPEED_LOG_DIR:-$HOME/speed_logs}"
 readonly CRON_TAG="# internet-speed"
 readonly CSV_HEADER='Server ID,Sponsor,Server Name,Timestamp,Distance,Ping,Download,Upload,Share,IP Address'
@@ -43,6 +46,9 @@ USAGE
 
 ENVIRONMENT
    SPEED_LOG_DIR       Where to write CSV logs (default: ~/speed_logs)
+   SPEED_PREFLIGHT_HOST host:port probed before each run so an "internet
+                       is out" condition fails fast (default: 8.8.8.8:53;
+                       set to an empty string to skip the probe)
    SPECTRUM_PROMISED_DOWN   Your plan's promised download speed in Mbps
                             (e.g. 400). Enables "% below promised" stats.
    SPECTRUM_PROMISED_UP     Your plan's promised upload speed in Mbps.
@@ -85,19 +91,50 @@ EOF
    fi
 }
 
-cmd_run() {
-   require_cmd speedtest-cli
+# Strip double-quoted CSV fields (e.g. "Charlotte, NC") so an embedded
+# comma can't shift awk's -F, columns. The quotes and their contents go;
+# the commas around them stay, so column positions are preserved.
+_strip_quoted() {
+   sed 's/"[^"]*"//g'
+}
 
-   # Network preflight: speedtest-cli takes ~30s to fail if the network
-   # is down. A 3-second TCP probe to 8.8.8.8:53 catches the "internet
-   # is out" case fast so cron mail explains it clearly instead of
-   # dumping a wall of speedtest-cli traceback.
-   if ! timeout 3 bash -c ': > /dev/tcp/8.8.8.8/53' 2>/dev/null; then
-      echo "$SCRIPT_NAME: network is down (couldn't reach 8.8.8.8:53)" >&2
+# Network preflight: speedtest-cli takes ~30s to fail if the network is
+# down. A 3-second TCP probe catches the "internet is out" case fast so
+# cron mail explains it clearly instead of dumping a wall of
+# speedtest-cli traceback.
+#
+# Target is SPEED_PREFLIGHT_HOST (host:port, default 8.8.8.8:53); set it
+# to an empty string to skip the probe, e.g. on networks that block
+# outbound DNS to Google. Needs `timeout` (GNU coreutils) or `gtimeout`
+# (macOS: brew install coreutils); without either the probe is skipped
+# rather than risk hanging on a blocked connect().
+_preflight() {
+   local target="${SPEED_PREFLIGHT_HOST-8.8.8.8:53}"
+   if [[ -z "$target" ]]; then
+      return 0
+   fi
+   local host="${target%%:*}" port="53"
+   if [[ "$target" == *:* ]]; then
+      port="${target##*:}"
+   fi
+   local timeout_cmd
+   if command -v timeout >/dev/null 2>&1; then
+      timeout_cmd="timeout"
+   elif command -v gtimeout >/dev/null 2>&1; then
+      timeout_cmd="gtimeout"
+   else
+      return 0
+   fi
+   if ! "$timeout_cmd" 3 bash -c ": > /dev/tcp/$host/$port" 2>/dev/null; then
+      echo "$SCRIPT_NAME: network is down (couldn't reach $target)" >&2
       echo "Skipping speed test. Run again when connectivity returns." >&2
       exit 2
    fi
+}
 
+cmd_run() {
+   require_cmd speedtest-cli
+   _preflight
    mkdir -p "$LOG_DIR"
 
    local row ip log_file
@@ -115,11 +152,15 @@ cmd_run() {
    fi
    echo "$row" >> "$log_file"
 
-   # Friendly stdout for cron mail / manual runs.
-   local ping_ms down_mbps up_mbps
-   ping_ms="$(echo "$row" | awk -F, '{printf "%.1f", $6}')"
-   down_mbps="$(echo "$row" | awk -F, '{printf "%.1f", $7/1000000}')"
-   up_mbps="$(echo "$row" | awk -F, '{printf "%.1f", $8/1000000}')"
+   # Friendly stdout for cron mail / manual runs. The raw row is what got
+   # logged above; for the numbers we split a copy with quoted fields
+   # removed, otherwise a server name like "Charlotte, NC" shifts every
+   # column by one and ping/down/up come out wrong.
+   local fields ping_ms down_mbps up_mbps
+   fields="$(echo "$row" | _strip_quoted)"
+   ping_ms="$(echo "$fields" | awk -F, '{printf "%.1f", $6}')"
+   down_mbps="$(echo "$fields" | awk -F, '{printf "%.1f", $7/1000000}')"
+   up_mbps="$(echo "$fields" | awk -F, '{printf "%.1f", $8/1000000}')"
    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ping=${ping_ms}ms down=${down_mbps}Mbps up=${up_mbps}Mbps ip=$ip"
 }
 
@@ -142,8 +183,8 @@ cmd_summary() {
    # awk reads all rows across all CSV files, skips headers, computes
    # min/median/mean/max for ping (col 6), download (col 7), upload (col 8).
    # Download/upload are bits/sec from speedtest-cli; convert to Mbps.
-   # sed strips quoted fields (e.g. "Charlotte, NC") so embedded commas
-   # don't confuse awk's -F, splitter.
+   # _load_rows_sorted has already stripped quoted fields (e.g.
+   # "Charlotte, NC") so embedded commas don't confuse awk's -F, splitter.
    # shellcheck disable=SC2016
    _load_rows_sorted | awk -F, \
       -v promised_down="$promised_down" \
@@ -151,12 +192,23 @@ cmd_summary() {
       -v outage_down="$outage_down" \
       -v outage_ping="$outage_ping" \
       -v log_dir="$LOG_DIR" '
-      function isort(arr, n,    i, j, key) {
-         # insertion sort, portable across awk/mawk/gawk
-         for (i = 2; i <= n; i++) {
-            key = arr[i]; j = i - 1
-            while (j >= 1 && arr[j] > key) { arr[j+1] = arr[j]; j-- }
-            arr[j+1] = key
+      function hsort(arr, n,    i, t) {
+         # heapsort: O(n log n) and portable across awk/mawk/gawk/BSD awk.
+         # (The previous insertion sort was O(n^2): ~40 s at 20k rows and
+         # ~4 min at 40k rows, i.e. a year or two of 30-minute samples.)
+         for (i = int(n / 2); i >= 1; i--) siftdown(arr, i, n)
+         for (i = n; i > 1; i--) {
+            t = arr[1]; arr[1] = arr[i]; arr[i] = t
+            siftdown(arr, 1, i - 1)
+         }
+      }
+      function siftdown(arr, root, end,    child, t) {
+         while (2 * root <= end) {
+            child = 2 * root
+            if (child < end && arr[child] < arr[child + 1]) child++
+            if (arr[root] >= arr[child]) return
+            t = arr[root]; arr[root] = arr[child]; arr[child] = t
+            root = child
          }
       }
       function median(arr, n,    m) {
@@ -194,7 +246,7 @@ cmd_summary() {
       END {
          if (n == 0) { print "No data rows."; exit 1 }
          if (in_run) { outage_events++; outage_total_samples += run_samples }
-         isort(ping, n); isort(down, n); isort(up, n)
+         hsort(ping, n); hsort(down, n); hsort(up, n)
          for (i = 1; i <= n; i++) {
             s_ping += ping[i]; s_down += down[i]; s_up += up[i]
          }
@@ -249,11 +301,16 @@ cmd_summary() {
 # time-sorted stream with quoted fields stripped so awk -F, works.
 # Used by cmd_summary and cmd_outages.
 _load_rows_sorted() {
+   # Header lines are dropped by the $4 == "Timestamp" test, which works
+   # for every file in the concatenation. (A bare `NR > 1` here used to
+   # also throw away the first data row of a header-less first file.)
+   # LC_ALL=C keeps the ISO-8601 timestamp sort byte-wise and
+   # locale-independent.
    # shellcheck disable=SC2016
    cat "$LOG_DIR"/speed-*.csv \
-      | sed 's/"[^"]*"//g' \
-      | awk -F, 'NR > 1 && $4 != "" && $4 != "Timestamp"' \
-      | sort -t, -k4,4
+      | _strip_quoted \
+      | awk -F, '$4 != "" && $4 != "Timestamp"' \
+      | LC_ALL=C sort -t, -k4,4
 }
 
 cmd_hours() {
@@ -367,26 +424,29 @@ cmd_outages() {
 interval_to_cron() {
    # Convert "15m", "30m", "1h", "2h" into a cron schedule expression.
    local interval="$1"
+   # Validate the shape up front: anything but digits+unit would otherwise
+   # reach the (( )) arithmetic below and die with a confusing
+   # "unbound variable" instead of this message.
+   if [[ ! "$interval" =~ ^[0-9]+[mh]$ ]]; then
+      echo "$SCRIPT_NAME: invalid interval: $interval (use e.g. 15m, 30m, 1h)" >&2
+      exit 1
+   fi
+   # 10# forces decimal so "08m" isn't read as (invalid) octal.
+   local n=$((10#${interval%[mh]}))
    case "$interval" in
       *m)
-         local mins="${interval%m}"
-         if (( mins < 1 || mins > 59 )); then
+         if (( n < 1 || n > 59 )); then
             echo "$SCRIPT_NAME: minute interval must be 1-59, got: $interval" >&2
             exit 1
          fi
-         echo "*/$mins * * * *"
+         echo "*/$n * * * *"
          ;;
       *h)
-         local hrs="${interval%h}"
-         if (( hrs < 1 || hrs > 23 )); then
+         if (( n < 1 || n > 23 )); then
             echo "$SCRIPT_NAME: hour interval must be 1-23, got: $interval" >&2
             exit 1
          fi
-         echo "0 */$hrs * * *"
-         ;;
-      *)
-         echo "$SCRIPT_NAME: invalid interval: $interval (use e.g. 15m, 30m, 1h)" >&2
-         exit 1
+         echo "0 */$n * * *"
          ;;
    esac
 }
@@ -419,7 +479,15 @@ cmd_install_cron() {
 
    local schedule
    schedule="$(interval_to_cron "$interval")"
-   new_line="$schedule $SCRIPT_PATH >/dev/null 2>&1 $CRON_TAG"
+   # Quote the path so a checkout under a directory with spaces works.
+   # If SPEED_LOG_DIR was set when installing, bake it into the entry:
+   # cron doesn't read ~/.bashrc, so the job would otherwise log to the
+   # default dir while `summary` (run from your shell) reads another.
+   local env_prefix=""
+   if [[ -n "${SPEED_LOG_DIR:-}" ]]; then
+      env_prefix="SPEED_LOG_DIR=\"$SPEED_LOG_DIR\" "
+   fi
+   new_line="$schedule ${env_prefix}\"$SCRIPT_PATH\" >/dev/null 2>&1 $CRON_TAG"
 
    printf '%s\n%s\n' "$filtered" "$new_line" | grep -v '^$' | crontab -
    echo "$SCRIPT_NAME: installed crontab entry (every $interval)"
@@ -457,13 +525,27 @@ cmd_install_systemd() {
    fi
 
    mkdir -p "$unit_dir"
-   sed "s|@SCRIPT_PATH@|$SCRIPT_PATH|g" "$service_src" > "$service_dst"
+   # Pure-bash substitution: unlike sed there's no delimiter or escaping
+   # to trip over if the path contains |, &, or \.
+   local unit
+   unit="$(<"$service_src")"
+   unit="${unit//@SCRIPT_PATH@/"$SCRIPT_PATH"}"
+   # A `systemctl --user` service doesn't see ~/.bashrc exports, so bake
+   # SPEED_LOG_DIR into the unit if it is set right now (same reasoning
+   # as install-cron).
+   if [[ -n "${SPEED_LOG_DIR:-}" ]]; then
+      unit="$unit"$'\n'"Environment=\"SPEED_LOG_DIR=$SPEED_LOG_DIR\""
+   fi
+   printf '%s\n' "$unit" > "$service_dst"
    cp "$timer_src" "$timer_dst"
 
    systemctl --user daemon-reload
    systemctl --user enable --now internet-speed.timer
    echo "$SCRIPT_NAME: installed systemd timer (every 30 min)"
-   echo "  see: systemctl --user list-timers | grep mint"
+   if [[ -n "${SPEED_LOG_DIR:-}" ]]; then
+      echo "  log dir baked into the unit: $SPEED_LOG_DIR"
+   fi
+   echo "  see: systemctl --user list-timers | grep internet-speed"
 }
 
 cmd_migrate() {

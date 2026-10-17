@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a one-page monthly performance PDF for emailing your ISP.
 
-The report covers a single calendar month and includes:
+The report covers a single calendar month (in local time) and includes:
   - Header with ISP plan info (from SPECTRUM_PROMISED_* env vars)
   - Summary stats table (samples, % below promised, outage count)
   - Download/upload/ping time series with promised baseline and
@@ -19,36 +19,28 @@ from __future__ import annotations
 import argparse
 import calendar
 import datetime as dt
-import os
 import sys
 from pathlib import Path
 
-# Reuse loading + analysis helpers from plot.py to avoid duplicating logic.
+# plot.py doubles as the shared library: CSV loading, timestamp handling,
+# outage detection, hour bucketing and the matplotlib panel renderers all
+# live there so the PNG chart and this PDF can't drift apart.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plot import (  # noqa: E402
-    DEFAULT_LOG_DIR,
     OUTAGE_DOWN_BELOW,
     OUTAGE_PING_ABOVE,
+    PROG,
     detect_outages,
     find_csvs,
     hour_means,
+    import_matplotlib,
     load_rows,
+    outage_spans,
     pct_below,
+    plot_hours,
+    plot_metric,
+    promised_from_env,
 )
-
-
-def _import_matplotlib():
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.dates as mdates
-        import matplotlib.pyplot as plt
-        return plt, mdates
-    except ImportError:
-        sys.exit(
-            "report.py: matplotlib is required.\n"
-            "Install with: pip install --user matplotlib"
-        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,20 +64,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_month(spec: str | None) -> tuple[dt.datetime, dt.datetime, str]:
-    """Return (start_dt, end_dt_exclusive, 'YYYY-MM') for the chosen month."""
+    """Return (start, end_exclusive, 'YYYY-MM') for the chosen month, local time."""
     if spec:
         try:
             year, month = (int(x) for x in spec.split("-"))
+            start = dt.datetime(year, month, 1)  # also rejects month 0 or 13
         except ValueError:
-            sys.exit(f"report.py: bad --month '{spec}' (expected YYYY-MM)")
+            sys.exit(f"{PROG}: bad --month '{spec}' (expected YYYY-MM)")
     else:
-        today = dt.date.today().replace(day=1)
-        prev_last = today - dt.timedelta(days=1)
-        year, month = prev_last.year, prev_last.month
-
-    start = dt.datetime(year, month, 1)
-    next_month = dt.datetime(year + (month // 12), (month % 12) + 1, 1)
-    return start, next_month, f"{year:04d}-{month:02d}"
+        first_of_this_month = dt.date.today().replace(day=1)
+        prev_last = first_of_this_month - dt.timedelta(days=1)
+        start = dt.datetime(prev_last.year, prev_last.month, 1)
+    year, month = start.year, start.month
+    end = dt.datetime(year + (month // 12), (month % 12) + 1, 1)
+    return start, end, f"{year:04d}-{month:02d}"
 
 
 def filter_month(times, pings, downs, ups, start, end):
@@ -99,19 +91,19 @@ def main() -> int:
     paths = find_csvs(args.csv)
     times, pings, downs, ups = load_rows(paths)
     if not times:
-        sys.exit("report.py: no data rows found")
+        sys.exit(f"{PROG}: no data rows found")
 
     start, end, label = parse_month(args.month)
     times, pings, downs, ups = filter_month(times, pings, downs, ups, start, end)
     if not times:
-        sys.exit(f"report.py: no samples in {label} (range available: see speedtest.sh summary)")
+        sys.exit(f"{PROG}: no samples in {label} (range available: see speedtest.sh summary)")
 
     output = args.output or Path(f"report-{label}.pdf")
-    promised_down = float(os.environ.get("SPECTRUM_PROMISED_DOWN", "0")) or None
-    promised_up = float(os.environ.get("SPECTRUM_PROMISED_UP", "0")) or None
+    promised_down, promised_up = promised_from_env()
     outages = detect_outages(times, pings, downs)
+    spans = outage_spans(times, outages)
 
-    plt, mdates = _import_matplotlib()
+    plt, mdates = import_matplotlib()
     # A4 portrait at 100 dpi is roughly 8.27 x 11.69 inches.
     fig = plt.figure(figsize=(8.27, 11.69))
     gs = fig.add_gridspec(
@@ -136,9 +128,9 @@ def main() -> int:
     ax_down = fig.add_subplot(gs[2])
     ax_up = fig.add_subplot(gs[3], sharex=ax_down)
     ax_ping = fig.add_subplot(gs[4], sharex=ax_down)
-    _plot_metric(ax_down, times, downs, "Download (Mbps)", "tab:blue", promised_down, outages)
-    _plot_metric(ax_up, times, ups, "Upload (Mbps)", "tab:green", promised_up, outages)
-    _plot_metric(ax_ping, times, pings, "Ping (ms)", "tab:orange", None, outages)
+    plot_metric(ax_down, times, downs, "Download (Mbps)", "tab:blue", promised_down, spans, compact=True)
+    plot_metric(ax_up, times, ups, "Upload (Mbps)", "tab:green", promised_up, spans, compact=True)
+    plot_metric(ax_ping, times, pings, "Ping (ms)", "tab:orange", None, spans, compact=True)
     for ax in (ax_down, ax_up):
         plt.setp(ax.get_xticklabels(), visible=False)
     ax_ping.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
@@ -147,7 +139,7 @@ def main() -> int:
     gs_bottom = gs[5].subgridspec(1, 2, width_ratios=[1.2, 1])
     ax_hours = fig.add_subplot(gs_bottom[0])
     ax_outages = fig.add_subplot(gs_bottom[1]); ax_outages.axis("off")
-    _plot_hours(ax_hours, hour_means(times, downs), promised_down)
+    plot_hours(ax_hours, hour_means(times, downs), promised_down, compact=True)
     _render_outage_list(ax_outages, outages, times)
 
     fig.savefig(output, format="pdf")
@@ -176,46 +168,6 @@ def _render_stats(ax, times, pings, downs, ups, promised_down, promised_up, outa
         y = 1 - (i + 0.7) / (len(rows) + 0.5)
         ax.text(0.00, y, k, fontsize=9, fontweight="bold")
         ax.text(0.32, y, v, fontsize=9, family="monospace")
-
-
-def _plot_metric(ax, times, values, label, color, baseline, outages):
-    ax.plot(times, values, color=color, linewidth=1.0, marker=".", markersize=2)
-    ax.set_ylabel(label, fontsize=9)
-    ax.tick_params(labelsize=8)
-    ax.grid(True, alpha=0.3)
-    if baseline is not None:
-        ax.axhline(baseline, color="red", linestyle="--", linewidth=1, label=f"promised: {baseline:g}")
-        ax.legend(loc="lower right", fontsize=8)
-    for start, end in outages:
-        ax.axvspan(times[start], times[end], color="red", alpha=0.18, zorder=0)
-
-
-def _plot_hours(ax, hour_data, baseline):
-    hours = [h for h, _, _ in hour_data]
-    means = [m if m is not None else 0 for _, m, _ in hour_data]
-    counts = [n for _, _, n in hour_data]
-    colors = []
-    for m, n in zip(means, counts):
-        if n == 0:
-            colors.append("#cccccc")
-        elif baseline is None:
-            colors.append("tab:blue")
-        elif m < baseline * 0.7:
-            colors.append("tab:red")
-        elif m < baseline:
-            colors.append("tab:orange")
-        else:
-            colors.append("tab:green")
-    ax.bar(hours, means, color=colors, width=0.85)
-    if baseline is not None:
-        ax.axhline(baseline, color="red", linestyle="--", linewidth=1)
-    ax.set_xticks(range(0, 24, 3))
-    ax.set_xticklabels([f"{h:02d}" for h in range(0, 24, 3)], fontsize=8)
-    ax.set_xlabel("hour of day", fontsize=9)
-    ax.set_ylabel("Mean down (Mbps)", fontsize=9)
-    ax.set_title("By hour-of-day", fontsize=10, loc="left")
-    ax.tick_params(labelsize=8)
-    ax.grid(True, alpha=0.3, axis="y")
 
 
 def _render_outage_list(ax, outages, times):
