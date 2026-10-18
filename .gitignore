@@ -14,6 +14,8 @@ venv/
 # Generated charts
 speed-chart.png
 *.png
+!images/*.png
+
 
 # Local speed test logs
 speed_logs/

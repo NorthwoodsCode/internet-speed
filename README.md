@@ -9,6 +9,23 @@ Cron a `speedtest-cli` run every 15–30 minutes, accumulate a CSV log over week
 or months, then visualize it. Built originally to prove that Spectrum (Charter)
 wasn't delivering the speeds we paid for. Works with any ISP.
 
+## At a glance
+
+### How it works: test, log, analyze, report
+
+The pipeline from a scheduled `speedtest-cli` run to charts and a PDF, the
+five things it measures, and what the dashboard looks like. Dashboard numbers
+in the graphic are illustrative demo data.
+
+![Overview infographic: the four-step test, log, analyze, report pipeline, the metrics tracked, and a dashboard preview](./images/internet-speed-infographic.png)
+
+### Cheat sheet: commands, configuration, and CSV format
+
+Quick-start commands, requirements, every environment variable, the CSV
+column layout, and the behaviour worth knowing before you rely on the data.
+
+![Cheat-sheet infographic: quick start, requirements and configuration, CSV format, and important behaviour](./images/internet-speed-infographic-v2.png)
+
 ---
 
 ## Quick start
